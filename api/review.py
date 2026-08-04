@@ -30,6 +30,9 @@ WEEKLY_DEFAULT = int(os.environ.get("REVIEW_WEEKLY_DEFAULT", "2"))
 GLOBAL_WEEKLY_CAP = int(os.environ.get("REVIEW_GLOBAL_WEEKLY_CAP", "50"))
 DIFF_LINE_CAP = int(os.environ.get("REVIEW_DIFF_LINE_CAP", "3000"))
 MARKER = "<!-- fleet-ai-review -->"
+# Help/decline replies carry a DIFFERENT marker: they cost no LLM call, so they
+# must not count against the quota that MARKER-counting measures.
+MARKER_HELP = "<!-- fleet-ai-help -->"
 VALID_TYPES = ("security", "perf", "general")
 ALLOWED_ASSOC = {"OWNER", "MEMBER", "COLLABORATOR"}
 
@@ -129,10 +132,37 @@ def _quota_state(token: str, repo: str, members: dict) -> tuple[int, int]:
 # --- pieces ----------------------------------------------------------------
 
 def _parse_type(body: str) -> str | None:
+    """Returns the review type, "help", or None for an unknown type."""
     rest = body.strip().removeprefix("/review").strip().split()
     if not rest:
         return "security"
-    return rest[0].lower() if rest[0].lower() in VALID_TYPES else None
+    word = rest[0].lower()
+    if word == "help":
+        return "help"
+    return word if word in VALID_TYPES else None
+
+
+def help_text(used: int, limit: int) -> str:
+    """Contextual help: a repo without an allowance is told how to request one,
+    not advertised a feature it can't use."""
+    if limit <= 0:
+        return ("🤖 **Platform AI review** — not enabled for this repo.\n\n"
+                "To request an allowance, open a PR on the registry adding "
+                "`ai_review.weekly_limit` for your repo in `members.yaml`. "
+                "More: https://agents.turingplanet.ai")
+    return (
+        "🤖 **Platform AI review** — comment one of these on a pull request:\n\n"
+        "| command | what it does |\n| --- | --- |\n"
+        "| `/review` | security review (the default) |\n"
+        "| `/review security` | injection, secrets, auth, traversal, deps |\n"
+        "| `/review perf` | N+1s, unbounded work, blocking calls |\n"
+        "| `/review general` | correctness, error handling, maintainability |\n"
+        "| `/review help` | this message |\n\n"
+        f"Reviews are **advisory only** — they never block your PR; your gate decides. "
+        f"Paid for by the platform. Quota: **{used}/{limit}** used this week (rolling 7 days).\n\n"
+        "Note: GitHub doesn't autocomplete third-party commands — just type the command as a "
+        "normal comment."
+    )
 
 
 def _changed_lines(diff: str) -> int:
@@ -159,8 +189,10 @@ def handle_review(repo: str, pr_number: int, comment_id: int) -> None:
     token = _inst_token(repo)
 
     def decline(reason: str) -> None:
+        # MARKER_HELP, not MARKER: a declined request ran no LLM call, so it must
+        # not consume the quota that MARKER-counting measures.
         _post(token, repo, pr_number,
-              f"🤖 **Review not run** — {reason}\n\n{MARKER}")
+              f"🤖 **Review not run** — {reason}\n\n{MARKER_HELP}")
 
     try:
         _review(repo, pr_number, comment_id, token, decline)
@@ -188,6 +220,9 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> 
                        "Register first — see https://agents.turingplanet.ai")
 
     used, limit = _quota_state(token, repo, members)
+    if rtype == "help":
+        # Help is free: it costs no LLM call, so it doesn't consume quota.
+        return _post(token, repo, pr_number, f"{help_text(used, limit)}\n\n{MARKER_HELP}")
     if limit <= 0:
         return decline("platform reviews are disabled for this repo "
                        "(`ai_review.weekly_limit` is 0 or unset by admin).")
