@@ -154,12 +154,23 @@ def _footer(used: int, limit: int) -> str:
 # --- orchestration (runs as a FastAPI background task) ----------------------
 
 def handle_review(repo: str, pr_number: int, comment_id: int) -> None:
+    """Entry point. Any unexpected failure is reported on the PR, never swallowed:
+    the member asked for something, so they get an answer either way."""
     token = _inst_token(repo)
 
     def decline(reason: str) -> None:
         _post(token, repo, pr_number,
               f"🤖 **Review not run** — {reason}\n\n{MARKER}")
 
+    try:
+        _review(repo, pr_number, comment_id, token, decline)
+    except Exception as exc:  # noqa: BLE001 — surface, don't swallow
+        decline(f"the platform hit an unexpected error (`{type(exc).__name__}`). "
+                "The platform team has been notified via service logs; try again shortly.")
+        raise
+
+
+def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> None:
     comment = _gh(token, "GET", f"/repos/{repo}/issues/comments/{comment_id}").json()
     body = comment.get("body") or ""
     if not body.strip().startswith("/review"):
