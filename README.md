@@ -40,3 +40,5 @@ poetry install && poetry run pytest
 ```
 
 The service boots without secrets — `/api/review` replies `not_configured` rather than crashing, so the endpoint can ship before its credentials do.
+
+<!-- moved to the turingplanet org 2026-08-04 -->
