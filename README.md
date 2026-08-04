@@ -71,7 +71,7 @@ This agent can be tracked by the [fleet migration bot](https://github.com/turing
      repo: <owner>/fleet-services
    ```
 2. **The bot's GitHub App can access this repo.** ⚠️ *Registration alone is NOT enough* — a GitHub App can't grant itself access; the **owner of this repo's account** grants it once:
-   - GitHub → **Settings → Applications → Installed GitHub Apps → `fleet-migration-bot` → Configure**
+   - GitHub → **Settings → Applications → Installed GitHub Apps → `turing-fleet-bot` → Configure**
    - Under **Repository access**: add this repo, **or** choose **All repositories** (simplest for a personal account — the bot only ever touches repos in `members.yaml`).
    - On an org you don't administer, ask the platform admin to grant it.
 
