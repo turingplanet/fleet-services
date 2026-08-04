@@ -1,0 +1,12 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY.
+# This records which agent-template version this repo was generated from,
+# so `copier update` can pull future changes as a 3-way merge.
+_commit: v0.0.18
+_src_path: gh:turingplanet/agent-template
+author_email: walkerhaozheng@gmail.com
+author_name: Turing Planet
+description: 'Platform-side services: on-demand AI review (RFC 002), registrar (RFC
+    001 §10)'
+project_name: fleet-services
+project_slug: fleet-services
+register_in_fleet: false

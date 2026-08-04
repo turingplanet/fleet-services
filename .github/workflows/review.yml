@@ -1,0 +1,20 @@
+# THIN POINTER. Copied into every member repo at creation, then detached.
+# It carries NO logic — it only references the central flow by version (REFERENCE path),
+# and passes through the (optional) key for the advisory LLM review.
+name: review
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write   # lets the advisory review agent post a PR comment
+jobs:
+  review:
+    uses: turingplanet/policies/.github/workflows/review-reusable.yml@v0.0.7
+    with:
+      contract: v1
+      policies_ref: v0.0.7   # MUST match the uses:@ref above — pins the policies schema + review agent
+                             # (GitHub can't expose the called workflow's own ref, so it's passed in)
+    secrets:
+      # Optional — set an ANTHROPIC_API_KEY repo/org secret to enable the AI review.
+      # Undefined resolves to empty and the agent simply skips; fork PRs never receive it.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

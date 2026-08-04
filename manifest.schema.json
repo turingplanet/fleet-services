@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://turing-planet.dev/schemas/agent-manifest/v1.json",
+  "title": "Agent Manifest v1",
+  "description": "THE SEAM. Both the standing review agent and the deterministic workflow read from this file. Its name (agent.manifest.yaml) and location (repo root) are THE anchor — the one hardcoded thing in the whole system.",
+  "type": "object",
+  "required": ["apiVersion", "profile", "toolchain", "paths", "commands"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "description": "Contract version the gate enforces against. Bumping it drives the migration levers.",
+      "type": "string",
+      "enum": ["v1"]
+    },
+    "profile": {
+      "description": "Selects a behavior set from the platform-owned library (extensibility lever — e.g. add a TS frontend agent type WITHOUT forking the agent).",
+      "type": "string",
+      "minLength": 1
+    },
+    "toolchain": {
+      "type": "object",
+      "required": ["language", "packageManager"],
+      "additionalProperties": false,
+      "properties": {
+        "language": { "type": "string", "minLength": 1 },
+        "packageManager": {
+          "description": "The field Scenario B (pip -> poetry -> uv) flips.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "paths": {
+      "description": "The fields Scenario A (structure move) flips. The agent and the deterministic steps resolve code locations from here — nothing is hardcoded.",
+      "type": "object",
+      "required": ["api", "mcp"],
+      "additionalProperties": false,
+      "properties": {
+        "api": { "type": "string", "minLength": 1 },
+        "mcp": { "type": "string", "minLength": 1 }
+      }
+    },
+    "commands": {
+      "description": "Declared lifecycle commands. The workflow runs EXACTLY these; CI knows nothing toolchain-specific.",
+      "type": "object",
+      "required": ["install", "test"],
+      "additionalProperties": false,
+      "properties": {
+        "install":  { "type": "string", "minLength": 1 },
+        "test":     { "type": "string", "minLength": 1 },
+        "lint":     { "type": "string" },
+        "security": { "type": "string" }
+      }
+    }
+  }
+}
