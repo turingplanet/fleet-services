@@ -204,11 +204,18 @@ def handle_review(repo: str, pr_number: int, comment_id: int) -> None:
 
 def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> None:
     comment = _gh(token, "GET", f"/repos/{repo}/issues/comments/{comment_id}").json()
-    body = comment.get("body") or ""
-    if not body.strip().startswith("/review"):
+    body = (comment.get("body") or "").strip()
+    if not (body.startswith("/review") or body.startswith("/register") or body.startswith("/join")):
         return  # not our command; ignore silently (bogus call)
     if comment.get("author_association") not in ALLOWED_ASSOC:
-        return decline("only repo collaborators can request platform reviews.")
+        return decline("only repo collaborators can use platform commands.")
+
+    if body.startswith("/register") or body.startswith("/join"):
+        # Self-service registration (RFC 001 §10 / M4) — free, never consumes quota.
+        from api.registrar import handle_register, register_reply
+
+        outcome = handle_register(repo)
+        return _post(token, repo, pr_number, f"{register_reply(outcome)}\n\n{MARKER_HELP}")
     rtype = _parse_type(body)
     if rtype is None:
         return decline(f"unknown review type. Valid: `/review {' | '.join(VALID_TYPES)}` "
@@ -216,8 +223,9 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> 
 
     members = _members()
     if repo not in members:
-        return decline("this repo isn't registered in the fleet (members.yaml). "
-                       "Register first — see https://agents.turingplanet.ai")
+        return decline("this repo isn't registered in the fleet yet. "
+                       "**Reply `/register` to request membership** (a members.yaml PR opens for "
+                       "admin approval) — or see https://agents.turingplanet.ai")
 
     used, limit = _quota_state(token, repo, members)
     if rtype == "help":

@@ -34,3 +34,18 @@ def test_markers_are_distinct():
     """Declines and help must not count against quota."""
     from api.review import MARKER, MARKER_HELP
     assert MARKER != MARKER_HELP and MARKER not in MARKER_HELP
+
+
+def test_register_reply_wordings():
+    from api.registrar import register_reply
+    assert "Registration PR opened" in register_reply({"status": "pr_opened", "pr": "http://x"})
+    assert "already on the fleet roster" in register_reply({"status": "already_registered"})
+    assert "install the platform App" in register_reply(
+        {"status": "app_not_installed", "install_url": "http://x"})
+    assert "fleet.register" in register_reply({"status": "not_consented"})
+
+
+def test_register_repo_validation():
+    from api.registrar import handle_register
+    assert handle_register("not-a-repo")["status"] == "invalid_repo"
+    assert handle_register("../evil/path")["status"] == "invalid_repo"

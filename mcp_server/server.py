@@ -94,6 +94,20 @@ def build_http_app():
         background.add_task(handle_review, req.repo, req.pr_number, req.comment_id)
         return {"status": "accepted"}
 
+    # --- self-service fleet registration (RFC 001 §10 / M4) -----------------
+    class RegisterRequest(BaseModel):
+        repo: str
+
+    @app.post("/api/register")
+    def api_register(req: RegisterRequest):
+        import os
+
+        if not (os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")):
+            return {"status": "not_configured"}
+        from api.registrar import handle_register
+
+        return handle_register(req.repo)
+
     app.mount("/", mcp_app)  # /mcp is served by the mounted MCP app
     return app
 
