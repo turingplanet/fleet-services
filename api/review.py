@@ -171,8 +171,26 @@ def _changed_lines(diff: str) -> int:
                and not line.startswith(("+++", "---")))
 
 
-def _post(token: str, repo: str, pr: int, body: str) -> None:
-    _gh(token, "POST", f"/repos/{repo}/issues/{pr}/comments", json={"body": body})
+def _post(token: str, repo: str, pr: int, body: str) -> dict:
+    return _gh(token, "POST", f"/repos/{repo}/issues/{pr}/comments", json={"body": body}).json()
+
+
+def _edit(token: str, repo: str, comment_id: int, body: str) -> None:
+    _gh(token, "PATCH", f"/repos/{repo}/issues/comments/{comment_id}", json={"body": body})
+
+
+def _ack(token: str, repo: str, comment_id: int) -> None:
+    """👀 on the member's command comment — instant 'heard you', zero noise."""
+    try:
+        _gh(token, "POST", f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+            json={"content": "eyes"})
+    except Exception:  # noqa: BLE001 — cosmetic only
+        pass
+
+
+PROGRESS = ("🔍 **Review in progress** — fetching the diff and running the platform's "
+            "Claude (typically 1–2 minutes). *This message will update with the result; "
+            "if it hasn't after ~5 minutes, re-run the command.*")
 
 
 def _footer(used: int, limit: int) -> str:
@@ -187,22 +205,30 @@ def handle_review(repo: str, pr_number: int, comment_id: int) -> None:
     """Entry point. Any unexpected failure is reported on the PR, never swallowed:
     the member asked for something, so they get an answer either way."""
     token = _inst_token(repo)
+    ctx = {"progress_id": None}   # id of the in-place progress comment, once posted
+
+    def respond(body: str) -> None:
+        # Edit the progress comment if one exists (no extra notification spam);
+        # otherwise post fresh.
+        if ctx["progress_id"]:
+            _edit(token, repo, ctx["progress_id"], body)
+        else:
+            _post(token, repo, pr_number, body)
 
     def decline(reason: str) -> None:
         # MARKER_HELP, not MARKER: a declined request ran no LLM call, so it must
         # not consume the quota that MARKER-counting measures.
-        _post(token, repo, pr_number,
-              f"🤖 **Review not run** — {reason}\n\n{MARKER_HELP}")
+        respond(f"🤖 **Review not run** — {reason}\n\n{MARKER_HELP}")
 
     try:
-        _review(repo, pr_number, comment_id, token, decline)
+        _review(repo, pr_number, comment_id, token, decline, respond, ctx)
     except Exception as exc:  # noqa: BLE001 — surface, don't swallow
         decline(f"the platform hit an unexpected error (`{type(exc).__name__}`). "
                 "The platform team has been notified via service logs; try again shortly.")
         raise
 
 
-def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> None:
+def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, respond, ctx) -> None:
     comment = _gh(token, "GET", f"/repos/{repo}/issues/comments/{comment_id}").json()
     body = (comment.get("body") or "").strip()
     if not (body.startswith("/review") or body.startswith("/register") or body.startswith("/join")):
@@ -221,6 +247,12 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> 
         return decline(f"unknown review type. Valid: `/review {' | '.join(VALID_TYPES)}` "
                        "(bare `/review` = security).")
 
+    if rtype != "help":
+        # Instant feedback for the slow path: 👀 the command, post a progress
+        # comment, and edit THAT comment with whatever the outcome is.
+        _ack(token, repo, comment_id)
+        ctx["progress_id"] = _post(token, repo, pr_number, PROGRESS)["id"]
+
     members = _members()
     if repo not in members:
         return decline("this repo isn't registered in the fleet yet. "
@@ -230,7 +262,8 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> 
     used, limit = _quota_state(token, repo, members)
     if rtype == "help":
         # Help is free: it costs no LLM call, so it doesn't consume quota.
-        return _post(token, repo, pr_number, f"{help_text(used, limit)}\n\n{MARKER_HELP}")
+        _post(token, repo, pr_number, f"{help_text(used, limit)}\n\n{MARKER_HELP}")
+        return None
     if limit <= 0:
         return decline("platform reviews are disabled for this repo "
                        "(`ai_review.weekly_limit` is 0 or unset by admin).")
@@ -263,5 +296,4 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline) -> 
         }],
     )
     review = "".join(b.text for b in msg.content if b.type == "text")
-    _post(token, repo, pr_number,
-          f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit)}")
+    respond(f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit)}")
