@@ -16,9 +16,11 @@ Live at `https://fleet-services.agents.turingplanet.ai` — deployed like any me
 4. caps the diff size;
 5. runs the platform's Claude with the review persona and posts an **advisory** comment via the App.
 
-Reviews never block a PR — the member's own gate decides. Help and decline replies carry a different marker so they never consume quota. Any unexpected failure is reported on the PR: silent failure is banned.
+You get feedback immediately: a 👀 reaction plus a "🔍 Review in progress" comment within seconds, which is then **edited in place** into the final review (~1–2 min) — one comment total, no notification spam. Reviews never block a PR — the member's own gate decides. Help and decline replies carry a different marker so they never consume quota. Any unexpected failure is reported on the PR: silent failure is banned.
 
-**Planned:** `POST /api/register` — the deferred auto-registration endpoint (RFC 001 §10).
+**`POST /api/register`** — self-service fleet registration ([RFC 001 §10](https://github.com/turingplanet/agent-legion/blob/main/rfcs/001-migration-and-deploy.md)). Send `{repo}` (public metadata); the service verifies the fleet App is installed on that repo (the keys) and that its `agent.manifest.yaml` says `fleet.register: true` (the consent), then opens a members.yaml PR on the registry with platform credentials. **Merging = admission** — nothing happens until an admin decides. Reached from `register.yml` (fires on pushes to main) or the `/register` / `/join` PR comment, which rides the same pipeline as `/review`. Idempotent against the roster and pending PRs; per-repo cooldown.
+
+**`POST /api/deregister`** — the symmetric exit (see `scripts/teardown.sh` in the template). Consent is verified server-side: the repo's manifest must no longer say `fleet.register: true` (or the repo is gone — ghost cleanup). One PR removes the repo from members.yaml **and** deployments.yaml; merging it makes the deploy-fleet reconciler tear down platform hosting automatically.
 
 ## Configuration
 
