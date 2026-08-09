@@ -35,13 +35,20 @@ def _outcome(status: str, **kw) -> dict:
 
 
 def handle_register(repo: str) -> dict:
-    """Idempotent: safe to call on every push. Returns a status dict."""
+    """Idempotent: safe to call on every push. Returns a status dict — never
+    raises: unexpected failures come back as {"status": "error"} so the
+    member's workflow log shows something readable instead of a raw 500."""
+    try:
+        return _register(repo)
+    except Exception as exc:  # noqa: BLE001 — surface, don't 500
+        return _outcome("error", detail=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _register(repo: str) -> dict:
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
         return _outcome("invalid_repo")
-    now = time.time()
-    if now - _COOLDOWN.get(repo, 0) < COOLDOWN_S:
+    if time.time() - _COOLDOWN.get(repo, 0) < COOLDOWN_S:
         return _outcome("cooldown", detail="recently attempted — try again in a few minutes")
-    _COOLDOWN[repo] = now
 
     # The keys: is the fleet App installed on this repo?
     try:
@@ -83,7 +90,11 @@ def handle_register(repo: str) -> dict:
         _gh(rtok, "POST", f"/repos/{REGISTRY_REPO}/git/refs",
             json={"ref": f"refs/heads/{branch}", "sha": main_sha})
     except Exception:
-        pass  # stale branch from an earlier attempt without an open PR — reuse it
+        # Stale branch from an earlier attempt with no open PR: RESET it to main.
+        # Reusing it as-is desyncs the file sha and 409s the content write
+        # (bit us live 2026-08-09 after a test-cycle cleanup rewrote members.yaml).
+        _gh(rtok, "PATCH", f"/repos/{REGISTRY_REPO}/git/refs/heads/{branch}",
+            json={"sha": main_sha, "force": True})
 
     slug = repo.split("/")[1]
     new_text = text.rstrip("\n") + f"\n\n  - name: {slug}\n    repo: {repo}\n"
@@ -102,6 +113,9 @@ def handle_register(repo: str) -> dict:
                  f"**Merging = admission. Closing = decline.** Nothing happens until an admin decides.\n\n"
                  f"Requested via `register.yml` / the `/register` command (RFC 001 §10)."),
     }).json()
+    # Cooldown only after the expensive successful path — a failed or
+    # user-fixable attempt (missing App, no consent) must not lock retries out.
+    _COOLDOWN[repo] = time.time()
     return _outcome("pr_opened", pr=pr["html_url"])
 
 
