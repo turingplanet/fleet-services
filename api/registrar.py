@@ -139,3 +139,110 @@ def register_reply(outcome: dict) -> str:
     if s == "cooldown":
         return "🕐 A registration attempt just ran — try again in a few minutes."
     return f"🤖 Registration couldn't run: {outcome.get('detail', s)}"
+
+
+# --- deregistration (the symmetric twin) -------------------------------------
+
+def _remove_entry(text: str, repo: str) -> str:
+    """Remove the list item whose block contains `repo: <repo>` (plus its
+    indented continuation lines), then collapse tripled blank lines."""
+    out, removed = [], False
+    blocks = re.split(r"(?m)(?=^  - )", text)
+    for b in blocks:
+        if not removed and b.startswith("  - ") and re.search(
+                rf"(?m)^    repo: {re.escape(repo)}\s*$", b):
+            removed = True
+            continue
+        out.append(b)
+    result = "".join(out)
+    return re.sub(r"\n{3,}", "\n\n", result)
+
+
+def handle_deregister(repo: str) -> dict:
+    """Open a registry PR removing this repo from members.yaml AND
+    deployments.yaml. Consent = the repo's own manifest no longer says
+    fleet.register: true (or the repo is gone — ghost-roster cleanup).
+    Merging the PR removes membership; the deployments.yaml change makes
+    the existing deploy-fleet reconciler tear down hosting. Never raises."""
+    try:
+        return _deregister(repo)
+    except Exception as exc:  # noqa: BLE001
+        return _outcome("error", detail=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _deregister(repo: str) -> dict:
+    if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+        return _outcome("invalid_repo")
+
+    # Consent gate: a repo that still declares register: true cannot be
+    # deregistered by an outsider's curl. Repo unreachable = ghost cleanup, allowed.
+    try:
+        token = _inst_token(repo)
+        try:
+            raw = _gh(token, "GET", f"/repos/{repo}/contents/agent.manifest.yaml",
+                      accept="application/vnd.github.raw").text
+            if ((yaml.safe_load(raw) or {}).get("fleet") or {}).get("register"):
+                return _outcome(
+                    "still_consented",
+                    detail="agent.manifest.yaml still says fleet.register: true — set it to "
+                           "false and push first (this proves the request comes from the repo owner)")
+        except Exception:
+            pass  # no readable manifest — fine for leaving
+    except Exception:
+        pass  # repo deleted / App removed — allow roster cleanup
+
+    rtok = _inst_token(REGISTRY_REPO)
+    mem = _gh(rtok, "GET", f"/repos/{REGISTRY_REPO}/contents/members.yaml").json()
+    mem_text = base64.b64decode(mem["content"]).decode()
+    dep = _gh(rtok, "GET", f"/repos/{REGISTRY_REPO}/contents/deployments.yaml").json()
+    dep_text = base64.b64decode(dep["content"]).decode()
+    pat = re.compile(rf"(?m)^    repo: {re.escape(repo)}\s*$")
+    in_mem, in_dep = bool(pat.search(mem_text)), bool(pat.search(dep_text))
+
+    if not in_mem and not in_dep:
+        owner = REGISTRY_REPO.split("/")[0]
+        reg_branch = f"register/{repo.replace('/', '-')}"
+        prs = _gh(rtok, "GET",
+                  f"/repos/{REGISTRY_REPO}/pulls?state=open&head={owner}:{reg_branch}").json()
+        if prs:
+            return _outcome("registration_pending", pr=prs[0]["html_url"],
+                            detail="not on the roster yet — ask the admin to CLOSE the pending "
+                                   "registration PR instead")
+        return _outcome("not_registered")
+
+    branch = f"deregister/{repo.replace('/', '-')}"
+    owner = REGISTRY_REPO.split("/")[0]
+    prs = _gh(rtok, "GET",
+              f"/repos/{REGISTRY_REPO}/pulls?state=open&head={owner}:{branch}").json()
+    if prs:
+        return _outcome("pr_pending", pr=prs[0]["html_url"])
+
+    main_sha = _gh(rtok, "GET", f"/repos/{REGISTRY_REPO}/git/ref/heads/main").json()["object"]["sha"]
+    try:
+        _gh(rtok, "POST", f"/repos/{REGISTRY_REPO}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": main_sha})
+    except Exception:
+        _gh(rtok, "PATCH", f"/repos/{REGISTRY_REPO}/git/refs/heads/{branch}",
+            json={"sha": main_sha, "force": True})
+
+    for present, cur, text, fname in ((in_mem, mem, mem_text, "members.yaml"),
+                                      (in_dep, dep, dep_text, "deployments.yaml")):
+        if present:
+            _gh(rtok, "PUT", f"/repos/{REGISTRY_REPO}/contents/{fname}", json={
+                "message": f"fleet: deregister {repo} (self-service) — {fname}",
+                "content": base64.b64encode(_remove_entry(text, repo).encode()).decode(),
+                "sha": cur["sha"], "branch": branch,
+            })
+
+    scope = " + ".join(x for x, p in (("membership", in_mem), ("platform hosting", in_dep)) if p)
+    pr = _gh(rtok, "POST", f"/repos/{REGISTRY_REPO}/pulls", json={
+        "title": f"fleet: deregister {repo}",
+        "head": branch, "base": "main",
+        "body": (f"Self-service DEREGISTRATION for `{repo}` — removes: **{scope}**.\n\n"
+                 f"Consent verified: the repo's manifest no longer says `fleet.register: true` "
+                 f"(or the repo is gone).\n\n"
+                 f"**Merging = removal.** The deployments.yaml change makes the deploy-fleet "
+                 f"reconciler delete the Railway service and drop the route automatically. "
+                 f"Closing = the member stays.\n\nRequested via `scripts/teardown.sh`."),
+    }).json()
+    return _outcome("pr_opened", pr=pr["html_url"], removes=scope)

@@ -49,3 +49,55 @@ def test_register_repo_validation():
     from api.registrar import handle_register
     assert handle_register("not-a-repo")["status"] == "invalid_repo"
     assert handle_register("../evil/path")["status"] == "invalid_repo"
+
+
+SAMPLE_MEMBERS = """# header comment
+members:
+  - name: hello-agent
+    repo: enochhz/hello-agent
+
+  - name: bye-agent
+    repo: alice/bye-agent
+    ai_review:
+      weekly_limit: 5   # pilot
+
+  - name: keeper
+    repo: bob/keeper
+"""
+
+SAMPLE_DEPLOYS = """# header
+deployments:
+  - slug: hello-fleet
+    repo: enochhz/hello-fleet
+    host: platform
+  - slug: bye-agent
+    repo: alice/bye-agent
+    host: platform
+"""
+
+
+def test_remove_entry_with_subkeys():
+    from api.registrar import _remove_entry
+    out = _remove_entry(SAMPLE_MEMBERS, "alice/bye-agent")
+    assert "bye-agent" not in out and "weekly_limit" not in out
+    assert "hello-agent" in out and "keeper" in out
+    import yaml
+    assert len(yaml.safe_load(out)["members"]) == 2
+
+
+def test_remove_entry_deployments():
+    from api.registrar import _remove_entry
+    out = _remove_entry(SAMPLE_DEPLOYS, "alice/bye-agent")
+    assert "bye-agent" not in out and "hello-fleet" in out
+    import yaml
+    assert len(yaml.safe_load(out)["deployments"]) == 1
+
+
+def test_remove_entry_noop_when_absent():
+    from api.registrar import _remove_entry
+    assert _remove_entry(SAMPLE_MEMBERS, "nobody/nothing") == SAMPLE_MEMBERS
+
+
+def test_deregister_repo_validation():
+    from api.registrar import handle_deregister
+    assert handle_deregister("junk")["status"] == "invalid_repo"

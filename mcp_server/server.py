@@ -108,6 +108,16 @@ def build_http_app():
 
         return handle_register(req.repo)
 
+    @app.post("/api/deregister")
+    def api_deregister(req: RegisterRequest):
+        import os
+
+        if not (os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")):
+            return {"status": "not_configured"}
+        from api.registrar import handle_deregister
+
+        return handle_deregister(req.repo)
+
     app.mount("/", mcp_app)  # /mcp is served by the mounted MCP app
     return app
 
