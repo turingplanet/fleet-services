@@ -209,10 +209,36 @@ PROGRESS = ("🔍 **Review in progress** — fetching the diff and running the p
             "if it hasn't after ~5 minutes, re-run the command.*")
 
 
-def _footer(used: int, limit: int) -> str:
+# USD per million tokens (input, output) by model-id prefix — for the cost
+# estimate shown on every LLM-produced comment. Update on model/price changes.
+_PRICES = (
+    ("claude-fable-5", (10.00, 50.00)),
+    ("claude-opus", (5.00, 25.00)),
+    ("claude-sonnet", (3.00, 15.00)),
+    ("claude-haiku", (1.00, 5.00)),
+)
+
+
+def _usage_line(usage) -> str:
+    """'12,345 in / 1,234 out tokens (~$0.09)' — empty string when unavailable."""
+    if usage is None:
+        return ""
+    inp = (usage.input_tokens or 0) + (getattr(usage, "cache_read_input_tokens", 0) or 0) \
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    out = usage.output_tokens or 0
+    line = f"Tokens: {inp:,} in / {out:,} out"
+    for prefix, (pi, po) in _PRICES:
+        if config.MODEL.startswith(prefix):
+            cost = (inp * pi + out * po) / 1_000_000
+            line += f" (~${cost:.4f})"
+            break
+    return f" {line}."
+
+
+def _footer(used: int, limit: int, usage=None) -> str:
     return (f"\n\n---\n{MARKER}\n*Platform AI review — advisory only, never blocking. "
             f"Your diff was sent to the platform's LLM for this review and is not retained. "
-            f"Quota: {used}/{limit} this week.*")
+            f"Quota: {used}/{limit} this week.{_usage_line(usage)}*")
 
 
 # --- orchestration (runs as a FastAPI background task) ----------------------
@@ -328,9 +354,9 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, res
     if rtype == "fix":
         respond(f"## 🔧 Platform fix suggestion\n\n{review}\n\n"
                 "*Advisory — apply the change yourself and let your gate re-judge. "
-                f"(A future `/implement-fix` may automate this.)*{_footer(used + 1, limit)}")
+                f"(A future `/implement-fix` may automate this.)*{_footer(used + 1, limit, msg.usage)}")
     else:
-        respond(f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit)}")
+        respond(f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit, msg.usage)}")
 
 
 # --- failure evidence for /fix-suggestion -----------------------------------
