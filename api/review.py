@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import time
 
 import httpx
@@ -53,6 +54,14 @@ PERSONAS = {
         "You are the platform's code reviewer. Review the diff for correctness bugs, error-handling "
         "gaps, and maintainability issues worth fixing. Concrete locations and fixes. "
         "If nothing significant, say so briefly."
+    ),
+    "fix": (
+        "You are the platform's CI failure diagnostician for a community of MCP agent repos. "
+        "You get the PR diff, the member's review workflow file, their agent manifest, and the "
+        "tail of the failing workflow job logs. Identify the MOST LIKELY root cause of the "
+        "failure, then propose the smallest concrete fix: exact file, exact change, ready to "
+        "apply. If the cause is platform-side tooling rather than the member's code, say so "
+        "plainly. State what you could not verify. Never invent log content."
     ),
 }
 
@@ -131,6 +140,12 @@ def _quota_state(token: str, repo: str, members: dict) -> tuple[int, int]:
 
 # --- pieces ----------------------------------------------------------------
 
+def _is_fix(body: str) -> bool:
+    """/fix-suggestion, or /review fix — the alias every existing member
+    forwarder already forwards (their filter predates /fix-suggestion)."""
+    return bool(body.startswith("/fix-suggestion") or re.match(r"^/review\s+fix(\b|$)", body))
+
+
 def _parse_type(body: str) -> str | None:
     """Returns the review type, "help", or None for an unknown type."""
     rest = body.strip().removeprefix("/review").strip().split()
@@ -157,6 +172,7 @@ def help_text(used: int, limit: int) -> str:
         "| `/review security` | injection, secrets, auth, traversal, deps |\n"
         "| `/review perf` | N+1s, unbounded work, blocking calls |\n"
         "| `/review general` | correctness, error handling, maintainability |\n"
+        "| `/fix-suggestion` | root-cause a failing check + suggested fix (alias: `/review fix`) |\n"
         "| `/review help` | this message |\n\n"
         f"Reviews are **advisory only** — they never block your PR; your gate decides. "
         f"Paid for by the platform. Quota: **{used}/{limit}** used this week (rolling 7 days).\n\n"
@@ -231,7 +247,8 @@ def handle_review(repo: str, pr_number: int, comment_id: int) -> None:
 def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, respond, ctx) -> None:
     comment = _gh(token, "GET", f"/repos/{repo}/issues/comments/{comment_id}").json()
     body = (comment.get("body") or "").strip()
-    if not (body.startswith("/review") or body.startswith("/register") or body.startswith("/join")):
+    if not (body.startswith("/review") or body.startswith("/register")
+            or body.startswith("/join") or body.startswith("/fix-suggestion")):
         return  # not our command; ignore silently (bogus call)
     if comment.get("author_association") not in ALLOWED_ASSOC:
         return decline("only repo collaborators can use platform commands.")
@@ -242,7 +259,7 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, res
 
         outcome = handle_register(repo)
         return _post(token, repo, pr_number, f"{register_reply(outcome)}\n\n{MARKER_HELP}")
-    rtype = _parse_type(body)
+    rtype = "fix" if _is_fix(body) else _parse_type(body)
     if rtype is None:
         return decline(f"unknown review type. Valid: `/review {' | '.join(VALID_TYPES)}` "
                        "(bare `/review` = security).")
@@ -276,9 +293,28 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, res
     diff = _gh(token, "GET", f"/repos/{repo}/pulls/{pr_number}",
                accept="application/vnd.github.diff").text
     lines = _changed_lines(diff)
-    if lines > DIFF_LINE_CAP:
-        return decline(f"diff too large ({lines} changed lines > {DIFF_LINE_CAP}). "
-                       "Narrow the PR and try again.")
+
+    if rtype == "fix":
+        failure = _failure_context(token, repo, pr)
+        if failure is None:
+            return decline("no failing workflow runs on this PR's head commit — nothing to diagnose. "
+                           "(Re-run after a check fails.)")
+        if lines > DIFF_LINE_CAP:  # for diagnosis the logs matter most — truncate, don't refuse
+            diff = "\n".join(diff.splitlines()[:DIFF_LINE_CAP]) + "\n[... diff truncated ...]"
+        user_content = (
+            f"PR #{pr_number} in {repo}: {pr.get('title', '')}\n"
+            f"Description:\n{(pr.get('body') or '(none)')[:2000]}\n\n"
+            f"{failure}\n\n<diff>\n{diff}\n</diff>"
+        )
+    else:
+        if lines > DIFF_LINE_CAP:
+            return decline(f"diff too large ({lines} changed lines > {DIFF_LINE_CAP}). "
+                           "Narrow the PR and try again.")
+        user_content = (
+            f"PR #{pr_number} in {repo}: {pr.get('title', '')}\n"
+            f"Description:\n{(pr.get('body') or '(none)')[:2000]}\n\n"
+            f"<diff>\n{diff}\n</diff>"
+        )
 
     import anthropic  # lazy: lets the server boot without the key configured
 
@@ -286,14 +322,68 @@ def _review(repo: str, pr_number: int, comment_id: int, token: str, decline, res
         model=config.MODEL,
         max_tokens=2500,
         system=f"{PERSONAS[rtype]}\n\n{GUARD}",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"PR #{pr_number} in {repo}: {pr.get('title', '')}\n"
-                f"Description:\n{(pr.get('body') or '(none)')[:2000]}\n\n"
-                f"<diff>\n{diff}\n</diff>"
-            ),
-        }],
+        messages=[{"role": "user", "content": user_content}],
     )
     review = "".join(b.text for b in msg.content if b.type == "text")
-    respond(f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit)}")
+    if rtype == "fix":
+        respond(f"## 🔧 Platform fix suggestion\n\n{review}\n\n"
+                "*Advisory — apply the change yourself and let your gate re-judge. "
+                f"(A future `/implement-fix` may automate this.)*{_footer(used + 1, limit)}")
+    else:
+        respond(f"## 🤖 Platform AI review — {rtype}\n\n{review}{_footer(used + 1, limit)}")
+
+
+# --- failure evidence for /fix-suggestion -----------------------------------
+
+def _fetch(path: str, token: str | None, accept: str = "application/vnd.github+json"):
+    """GET with redirect-following (log downloads 302 to blob storage);
+    None on any failure."""
+    headers = {"Accept": accept, "User-Agent": "fleet-services/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        r = httpx.get(f"{GH}{path}", headers=headers, timeout=30, follow_redirects=True)
+        r.raise_for_status()
+        return r
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _failure_context(token: str, repo: str, pr: dict) -> str | None:
+    """Failing runs on the PR head: failed steps + log tails, plus the member's
+    workflow file and manifest. The App token lacks the actions scope, so every
+    Actions call falls back to unauthenticated (fine for public member repos).
+    Returns None when nothing failed."""
+    def soft(path: str, accept: str = "application/vnd.github+json"):
+        return _fetch(path, token, accept) or _fetch(path, None, accept)
+
+    sha = (pr.get("head") or {}).get("sha", "")
+    runs_r = soft(f"/repos/{repo}/actions/runs?head_sha={sha}&per_page=20")
+    runs = ((runs_r.json().get("workflow_runs") if runs_r else None) or [])
+    failed = [r for r in runs if r.get("conclusion") in ("failure", "timed_out")][:2]
+    if not failed:
+        return None
+
+    parts = []
+    for run in failed:
+        jobs_r = soft(f"/repos/{repo}/actions/runs/{run['id']}/jobs")
+        for job in ((jobs_r.json().get("jobs") if jobs_r else None) or []):
+            if job.get("conclusion") != "failure":
+                continue
+            steps = "\n".join(f"  {s.get('conclusion')}: {s.get('name')}"
+                              for s in job.get("steps", []) if s.get("conclusion"))
+            log_r = soft(f"/repos/{repo}/actions/jobs/{job['id']}/logs")
+            if log_r is not None:
+                raw = log_r.text.splitlines()[-120:]
+                tail = "\n".join(line.split("Z ", 1)[-1] for line in raw)
+                tail = f"Log tail:\n<log>\n{tail}\n</log>"
+            else:
+                tail = "(job log unavailable)"
+            parts.append(f"Workflow '{run.get('name')}' / job '{job.get('name')}' FAILED.\n"
+                         f"Steps:\n{steps}\n{tail}")
+
+    for fname in (".github/workflows/review.yml", "agent.manifest.yaml"):
+        fr = soft(f"/repos/{repo}/contents/{fname}", accept="application/vnd.github.raw")
+        if fr is not None:
+            parts.append(f'<file name="{fname}">\n{fr.text[:4000]}\n</file>')
+    return "\n\n".join(parts)[:30000]
