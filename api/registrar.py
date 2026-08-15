@@ -25,7 +25,7 @@ import yaml
 
 from api.review import REGISTRY_REPO, _gh, _inst_token
 
-INSTALL_URL = "https://github.com/apps/turing-fleet-bot"
+INSTALL_URL = "https://github.com/apps/fleet-migration-bot"
 _COOLDOWN: dict[str, float] = {}          # per-repo burst guard (process-local)
 COOLDOWN_S = 600
 
