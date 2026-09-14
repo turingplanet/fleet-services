@@ -22,6 +22,8 @@ You get feedback immediately: a 👀 reaction plus a "🔍 Review in progress" c
 
 **`POST /api/deregister`** — the symmetric exit (see `scripts/teardown.sh` in the template). Consent is verified server-side: the repo's manifest must no longer say `fleet.register: true` (or the repo is gone — ghost cleanup). One PR removes the repo from members.yaml **and** deployments.yaml; merging it makes the deploy-fleet reconciler tear down platform hosting automatically.
 
+**`GET /api/quota`** — admin-only, read-only. `{ "<owner/repo>": { "used": n, "limit": n, "app_installed": bool } }` for every roster repo, using the exact same marker counting as `/review` (plus whether the fleet App can reach the repo — the registrar's "keys" check). Consumed by the [fleet-status](https://github.com/turingplanet/fleet-status) admin page from the registry's weekly run. Auth: `Authorization: Bearer $FLEET_ADMIN_KEY`; replies `503 not_configured` until that variable is set on the service. It only reads GitHub — nothing here writes.
+
 ## Configuration
 
 Runtime knobs live in `config.py`. Secrets (set as Railway variables, never in a member repo):
@@ -32,6 +34,7 @@ Runtime knobs live in `config.py`. Secrets (set as Railway variables, never in a
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | fleet App — reads diffs, posts comments, reads the registry |
 | `MODEL` | pinned review model (quality is fixed; quota is the cost dial) |
 | `REVIEW_WEEKLY_DEFAULT`, `REVIEW_GLOBAL_WEEKLY_CAP`, `REVIEW_DIFF_LINE_CAP` | cost guards |
+| `FLEET_ADMIN_KEY` | bearer for the admin read endpoint `/api/quota` (unset = endpoint off) |
 
 The App needs access to `agent-registry` (to read the roster) plus each member repo (which members grant themselves).
 

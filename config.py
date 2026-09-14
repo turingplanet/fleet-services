@@ -16,6 +16,7 @@ later should only require reading this file.
 | HOST              | rarely — bind address for HTTP mode   | 0.0.0.0        |
 | MODEL             | your /api code calls an LLM           | claude-opus-4-8|
 | ANTHROPIC_API_KEY | your /api code calls Claude           | (none)         |
+| FLEET_ADMIN_KEY   | admin-only read endpoints (/api/quota)| (none = off)   |
 ==============================================================================
 The starter agent needs NONE of these locally — stdio + no secrets.
 """
@@ -38,3 +39,6 @@ PORT = int(os.environ.get("PORT", "8000"))
 
 # --- model (only used if/when your /api logic calls an LLM) ---------------
 MODEL = os.environ.get("MODEL", "claude-opus-4-8")
+
+# --- admin (read-only status endpoints; empty = those endpoints are disabled) --
+FLEET_ADMIN_KEY = os.environ.get("FLEET_ADMIN_KEY", "")

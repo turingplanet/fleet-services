@@ -118,6 +118,24 @@ def build_http_app():
 
         return handle_deregister(req.repo)
 
+    # --- admin read-only: per-repo review quota + App-installed, for the status page --
+    from fastapi import Header, Response
+
+    @app.get("/api/quota")
+    def api_quota(response: Response, authorization: str | None = Header(default=None)):
+        import os
+
+        from api.quota import check_admin, quota_report
+
+        if not config.FLEET_ADMIN_KEY or not (
+                os.environ.get("GITHUB_APP_ID") and os.environ.get("GITHUB_APP_PRIVATE_KEY")):
+            response.status_code = 503
+            return {"status": "not_configured"}
+        if not check_admin(authorization, config.FLEET_ADMIN_KEY):
+            response.status_code = 401
+            return {"status": "unauthorized"}
+        return {"status": "ok", "quota": quota_report()}
+
     app.mount("/", mcp_app)  # /mcp is served by the mounted MCP app
     return app
 
