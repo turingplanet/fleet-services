@@ -17,6 +17,11 @@ later should only require reading this file.
 | MODEL             | your /api code calls an LLM           | claude-opus-4-8|
 | ANTHROPIC_API_KEY | your /api code calls Claude           | (none)         |
 | FLEET_ADMIN_KEY   | admin-only read endpoints (/api/quota)| (none = off)   |
+|                   | and the admin view of /api/fleet-status|               |
+| FLEET_STATUS_TTL  | how long a fleet snapshot is served   | 600 (seconds)  |
+|                   | before it is rebuilt in the background|                |
+| FLEET_STATUS_ORIGINS | browser origins allowed to read    | builders portal|
+|                   | /api/fleet-status (comma-separated)   | + localhost:3101|
 ==============================================================================
 The starter agent needs NONE of these locally — stdio + no secrets.
 """
@@ -42,3 +47,19 @@ MODEL = os.environ.get("MODEL", "claude-opus-4-8")
 
 # --- admin (read-only status endpoints; empty = those endpoints are disabled) --
 FLEET_ADMIN_KEY = os.environ.get("FLEET_ADMIN_KEY", "")
+
+# --- fleet status (GET /api/fleet-status, read by the builders portal) -----
+FLEET_STATUS_TTL = int(os.environ.get("FLEET_STATUS_TTL", "600"))
+FLEET_STATUS_ORIGINS = {
+    o.strip().rstrip("/")
+    for o in os.environ.get(
+        "FLEET_STATUS_ORIGINS", "https://builders.turingplanet.ai,http://localhost:3101"
+    ).split(",")
+    if o.strip()
+}
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://mcp.agents.turingplanet.ai").rstrip("/")
+FLEET_DOMAIN = os.environ.get("FLEET_DOMAIN", "agents.turingplanet.ai")
+TEMPLATE_REPO = os.environ.get("TEMPLATE_REPO", "turingplanet/agent-template")
+POLICIES_REPO = os.environ.get("POLICIES_REPO", "turingplanet/policies")
+# A check run counts as the gate when its name contains this (policies' job is "review / review").
+GATE_CHECK_NAME = os.environ.get("GATE_CHECK_NAME", "review").lower()

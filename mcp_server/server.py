@@ -136,6 +136,33 @@ def build_http_app():
             return {"status": "unauthorized"}
         return {"status": "ok", "quota": quota_report()}
 
+    # --- fleet snapshot for the builders portal: member view open, admin view by key ---
+    @app.get("/api/fleet-status")
+    def api_fleet_status(response: Response, authorization: str | None = Header(default=None),
+                         origin: str | None = Header(default=None)):
+        from api import fleet_status as fs
+        from api.quota import check_admin
+
+        response.headers["Vary"] = "Origin, Authorization"
+        if fs.allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+        if not fs.configured():
+            response.status_code = 503
+            return {"status": "not_configured"}
+        admin = False
+        if authorization:  # a key was offered: it must be the right one, never a silent downgrade
+            if not check_admin(authorization, config.FLEET_ADMIN_KEY):
+                response.status_code = 401
+                return {"status": "unauthorized"}
+            admin = True
+        try:
+            snapshot = fs.cached_snapshot()
+        except Exception as exc:  # noqa: BLE001 — first build failed and there is nothing to fall back on
+            response.status_code = 503
+            return {"status": "unavailable", "error": type(exc).__name__}
+        response.headers["Cache-Control"] = "private, no-store" if admin else "public, max-age=60"
+        return fs.view(snapshot, admin)
+
     app.mount("/", mcp_app)  # /mcp is served by the mounted MCP app
     return app
 
