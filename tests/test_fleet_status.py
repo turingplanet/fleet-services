@@ -217,3 +217,52 @@ def test_endpoint_503_when_the_first_build_fails(monkeypatch):
     monkeypatch.setattr(fs, "cached_snapshot", boom)
     r = c.get("/api/fleet-status")
     assert r.status_code == 503 and r.json() == {"status": "unavailable", "error": "RuntimeError"}
+
+
+# --- hosted services that aren't members ------------------------------------------
+class _Resp:
+    def __init__(self, code, text=""):
+        self.status_code, self.text = code, text
+
+
+class _Client:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def get(self, *a, **k):
+        if isinstance(self.resp, Exception):
+            raise self.resp
+        return self.resp
+
+
+def test_probe_classifies_answers():
+    assert fs.probe(_Client(_Resp(404, '{"detail":"Not Found"}')), "x")["status"] == "up"      # the app answered
+    assert fs.probe(_Client(_Resp(200, "ok")), "x") == {"status": "up", "httpStatus": 200}
+    assert fs.probe(_Client(_Resp(404, "unknown agent — see …")), "x")["status"] == "unrouted"  # the router answered
+    assert fs.probe(_Client(_Resp(502, "")), "x") == {"status": "down", "httpStatus": 502}
+    assert fs.probe(_Client(RuntimeError("timeout")), "x") == {"status": "down", "httpStatus": None}
+
+
+class _G:
+    def __init__(self, resp):
+        self.client = _Client(resp)
+
+    def get(self, path, **params):
+        return {"pushed_at": "2026-09-27T23:40:00Z"}
+
+
+def test_service_row_hosting_only_and_platform():
+    ctx = {"gateway_tools": {"e2e": 2}}
+    row, todos = fs._service_row(_G(_Resp(404, "{}")), {"slug": "nexus", "repo": "a/nexus", "host": "nexus.x"}, ctx)
+    assert row["kind"] == "service" and row["status"] == "up" and row["mcpTools"] is None and not todos
+    row, _ = fs._service_row(_G(_Resp(200, "")), {"slug": "e2e", "repo": "a/e2e", "host": "e2e.x"}, ctx)
+    assert row["mcpTools"] == 2 and row["lastActivity"] == "2026-09-27T23:40:00Z"
+    row, _ = fs._service_row(_G(_Resp(200, "")), {"slug": "mcp", "repo": "t/gw", "host": "mcp.x"}, ctx)
+    assert row["kind"] == "platform"
+    row, todos = fs._service_row(_G(_Resp(502, "")), {"slug": "down", "repo": "a/down", "host": "down.x"}, ctx)
+    assert row["status"] == "down" and todos[0]["audience"] == "member" and todos[0]["detail"] == "HTTP 502"
+
+
+def test_member_view_keeps_services():
+    snap = {**SNAPSHOT, "services": [{"slug": "nexus", "kind": "service", "status": "up"}]}
+    assert fs.view(snap, admin=False)["services"] == snap["services"]

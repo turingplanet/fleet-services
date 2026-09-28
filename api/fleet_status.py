@@ -6,6 +6,10 @@ there is nothing to store: a snapshot is computed, kept in memory for
 FLEET_STATUS_TTL seconds, and recomputed in the background once it goes stale.
 A restart just means the next request computes it again.
 
+Rows: `members` (repos on the members.yaml roster: scaffold, gate, hosting) and `services` (hosted entries in
+deployments.yaml that aren't members: hosting-only backends and the platform's own, with reachability and the
+MCP tool count the gateway sees).
+
 Two views of one snapshot:
   member view   no credentials. Versions, gate, hosting, App install, and the
                 to-dos a member can act on. No review quota, no admin to-dos.
@@ -231,17 +235,30 @@ def main_gate(g: _GitHub, repo: str, branch: str) -> tuple[str, str | None]:
 
 
 # ── gateway, pending PRs ────────────────────────────────────────────────────
-def live_backends(client: httpx.Client) -> tuple[set[str], dict[str, str], bool]:
-    """(slugs the gateway serves, slug → error, gateway reachable)."""
+def live_backends(client: httpx.Client) -> tuple[set[str], dict[str, str], bool, dict[str, int]]:
+    """(slugs the gateway serves, slug → error, gateway reachable, slug → MCP tool count)."""
     try:
         r = client.get(f"{config.GATEWAY_URL}/api/backends", timeout=15)
         r.raise_for_status()
         data = r.json()
         roster = data.get("roster") or []
         slugs = {b if isinstance(b, str) else (b.get("slug") or b.get("name") or "") for b in roster}
-        return (slugs - {""}, {k: str(v) for k, v in (data.get("errors") or {}).items()}, True)
+        tools = {k: int(v) for k, v in (data.get("tools_per_backend") or {}).items()}
+        return (slugs - {""}, {k: str(v) for k, v in (data.get("errors") or {}).items()}, True, tools)
     except Exception:  # noqa: BLE001 — an unreachable gateway is a status, not a crash
-        return (set(), {}, False)
+        return (set(), {}, False, {})
+
+
+def probe(client: httpx.Client, host: str) -> dict:
+    """Is a hosted service answering at its address? Any answer from the app counts as up (a 404 at / still means
+    it is running); the router's own 'unknown agent' means no route; a 5xx or no answer means down."""
+    try:
+        r = client.get(f"https://{host}/", timeout=8, follow_redirects=False)
+    except Exception:  # noqa: BLE001 — unreachable is a status
+        return {"status": "down", "httpStatus": None}
+    if r.status_code == 404 and r.text.startswith("unknown agent"):
+        return {"status": "unrouted", "httpStatus": 404}
+    return {"status": "down" if r.status_code >= 500 else "up", "httpStatus": r.status_code}
 
 
 def pending_prs(g: _GitHub) -> list[dict]:
@@ -257,6 +274,25 @@ def pending_prs(g: _GitHub) -> list[dict]:
         out.append({"number": pr["number"], "kind": kind, "subject": m.group(1) if m else pr["title"],
                     "url": pr["html_url"], "age_days": (now - opened).days})
     return out
+
+
+# ── one hosted service that is not a fleet member ───────────────────────────
+def _service_row(g: _GitHub, d: dict, ctx: dict) -> tuple[dict, list[dict]]:
+    """Hosting-only services (and the platform's own) have no scaffold or gate to report: just where they live,
+    whether they answer, and whether the gateway gets MCP tools from them."""
+    slug, repo = d["slug"], d.get("repo") or ""
+    meta = g.get(f"/repos/{repo}") if repo else None
+    answer = probe(g.client, d["host"])
+    tools = ctx["gateway_tools"].get(slug, 0)
+    row = {"slug": slug, "repo": repo, "host": d["host"], "kind": "platform" if slug in PLATFORM_SLUGS else "service",
+           **answer, "mcpTools": tools or None, "lastActivity": (meta or {}).get("pushed_at")}
+    todos = []
+    if answer["status"] != "up":
+        todos.append(_todo("member", slug,
+                           "hosted service isn't answering" if answer["status"] == "down" else "hosted service has no route",
+                           f"HTTP {answer['httpStatus']}" if answer["httpStatus"] else "no response",
+                           f"https://{d['host']}/", "open"))
+    return row, todos
 
 
 # ── one member row ──────────────────────────────────────────────────────────
@@ -347,27 +383,27 @@ def build_snapshot() -> dict:
         template_tags, policies_tags = _tags(g, config.TEMPLATE_REPO), _tags(g, config.POLICIES_REPO)
         roster = parse_members(g.file(REGISTRY_REPO, "members.yaml") or "")
         deployments = parse_deployments(g.file(REGISTRY_REPO, "deployments.yaml"))
-        live, gateway_errors, gateway_ok = live_backends(g.client)
+        live, gateway_errors, gateway_ok, gateway_tools = live_backends(g.client)
         prs = pending_prs(g)
         ctx = {
             "template_tags": template_tags,
             "latest_policies": policies_tags[0] if policies_tags else "—",
-            "deployments": deployments, "live": live, "gateway_errors": gateway_errors,
+            "deployments": deployments, "live": live, "gateway_errors": gateway_errors, "gateway_tools": gateway_tools,
             "pending": {p["subject"]: p for p in prs},
             "members_by_repo": {m["repo"]: m["entry"] for m in roster},
         }
+        # every hosted entry whose repo isn't a member: hosting-only services and the platform's own
+        roster_repos = {m["repo"] for m in roster}
+        hosted_only = [d for slug, d in deployments.items() if slug == d["slug"] and d.get("repo") not in roster_repos]
         with ThreadPoolExecutor(max_workers=6) as pool:
             results = list(pool.map(lambda m: _member_row(g, m, ctx), roster))
+            service_results = list(pool.map(lambda d: _service_row(g, d, ctx), hosted_only))
     finally:
         g.close()
 
     members = [row for row, _ in results if row]
-    todos = [t for _, ts in results for t in ts]
-    roster_repos = {m["repo"] for m in roster}
-    for slug, d in deployments.items():
-        if slug == d["slug"] and slug not in PLATFORM_SLUGS and d.get("repo") not in roster_repos:
-            todos.append(_todo("admin", slug, "hosted in deployments.yaml but not on the members.yaml roster", d.get("repo"),
-                               f"https://github.com/{REGISTRY_REPO}/blob/main/deployments.yaml", "view deployments.yaml"))
+    services = sorted((row for row, _ in service_results), key=lambda r: (r["kind"] == "platform", r["slug"]))
+    todos = [t for _, ts in results for t in ts] + [t for _, ts in service_results for t in ts]
     for p in prs:
         todos.insert(0, _todo("admin", p["subject"],
                               "approve registration" if p["kind"] == "register" else "approve hosting request",
@@ -382,11 +418,13 @@ def build_snapshot() -> dict:
             "deployed": sum(x["deploy"]["status"] in ("live", "unchecked", "down") for x in members),
             "outdated": sum(x["templateBehind"] > 0 or x["policiesOutdated"] for x in members),
             "pending": len(prs),
+            "services": len(services),
             "reviewUsed": sum(x["review"]["used"] for x in members if x["review"]),
             "reviewLimit": sum(x["review"]["limit"] for x in members if x["review"]),
         },
         "todos": todos,
         "members": members,
+        "services": services,
     }
 
 
